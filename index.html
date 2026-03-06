@@ -5,7 +5,7 @@
 <meta name="viewport" content="width=device-width, initial-scale=1.0" />
 <title>Organigramm – Unternehmensverzeichnis</title>
 
-<!-- No external dependencies – uses SharePoint built-in auth -->
+<script src="https://alcdn.msauth.net/browser/2.38.3/js/msal-browser.min.js"></script>
 <script>
 (function(){
   var proto = window.location.protocol;
@@ -969,11 +969,14 @@ const DEPT_COLORS = [
 ];
 
 /* ════════════════════════════════════════════════════════
-   AUTH – SharePoint-native, kein MSAL, keine externen CDNs
+   AUTH – MSAL mit Popup
    ════════════════════════════════════════════════════════ */
 
-// Cached Graph token
-let _graphToken = null;
+const TENANT_ID = 'fdb70646-023a-403b-a4b9-1f474a935123';
+const CLIENT_ID = '4bd5e16e-5345-4ded-adc8-2a7f25922786';
+const SCOPES    = ['User.Read', 'User.Read.All', 'User.ReadBasic.All'];
+
+let msalInstance = null;
 
 function setBootText(t) {
   const el = document.getElementById('boot-text');
@@ -989,8 +992,15 @@ function showBootError(msg) {
   const el = document.getElementById('login-error');
   if (el) { el.style.display = 'block'; el.innerHTML = '⚠️ ' + msg; }
   const btn = document.getElementById('login-btn');
-  if (btn) { btn.style.display = 'block'; btn.textContent = 'Seite neu laden'; btn.onclick = () => location.reload(); }
+  if (btn) { btn.style.display = 'block'; btn.textContent = 'Erneut versuchen'; btn.onclick = () => location.reload(); }
   console.error('[Org]', msg);
+}
+
+function showLoginBtn(label, fn) {
+  const sp = document.getElementById('boot-spinner');
+  if (sp) sp.style.display = 'none';
+  const btn = document.getElementById('login-btn');
+  if (btn) { btn.style.display = 'block'; btn.textContent = label; btn.onclick = fn; }
 }
 
 function hideBoot() {
@@ -1004,110 +1014,93 @@ function showApp() {
   document.getElementById('app').classList.add('visible');
 }
 
-// ─── Fetch with timeout ────────────────────────────────────────
-async function fetchWithTimeout(url, opts, ms = 8000) {
-  const ctrl = new AbortController();
-  const tid   = setTimeout(() => ctrl.abort(), ms);
-  try {
-    const res = await fetch(url, { ...opts, signal: ctrl.signal, credentials: 'include' });
-    clearTimeout(tid);
-    return res;
-  } catch(e) {
-    clearTimeout(tid);
-    if (e.name === 'AbortError') throw new Error('Timeout nach ' + ms/1000 + 's: ' + url);
-    throw e;
-  }
-}
-
-// ─── Derive SharePoint site root from current URL ──────────────
-function getSiteUrl() {
-  // e.g. https://dihag.sharepoint.com/sites/SITENAME
-  const p = window.location.pathname;
-  const m = p.match(/^(\/sites\/[^\/]+)/);
-  return window.location.origin + (m ? m[1] : '');
-}
-
-// ─── Get Graph token via SharePoint's built-in OAuth endpoint ──
 async function getToken() {
-  if (_graphToken) return _graphToken;
-
-  const siteUrl = getSiteUrl();
-  setBootText('Schritt 1/2 – SharePoint Session prüfen… (' + siteUrl + ')');
-
-  const ctxRes = await fetchWithTimeout(siteUrl + '/_api/contextinfo', {
-    method: 'POST',
-    headers: {
-      'Accept': 'application/json;odata=verbose',
-      'Content-Type': 'application/json;odata=verbose'
-    }
-  });
-
-  if (!ctxRes.ok) {
-    const body = await ctxRes.text().catch(() => '');
-    throw new Error('/_api/contextinfo fehlgeschlagen: HTTP ' + ctxRes.status + '<br><small>' + escHtml(body.substring(0, 300)) + '</small>');
+  const accounts = msalInstance.getAllAccounts();
+  if (!accounts.length) throw new Error('Nicht angemeldet');
+  try {
+    const r = await msalInstance.acquireTokenSilent({ scopes: SCOPES, account: accounts[0] });
+    return r.accessToken;
+  } catch(e) {
+    // Silent failed – try popup
+    const r = await msalInstance.acquireTokenPopup({ scopes: SCOPES });
+    return r.accessToken;
   }
-
-  const ctxData = await ctxRes.json();
-  const digest = ctxData?.d?.GetContextWebInformation?.FormDigestValue;
-  if (!digest) throw new Error('Kein FormDigestValue in contextinfo-Antwort.<br><small>' + escHtml(JSON.stringify(ctxData).substring(0,200)) + '</small>');
-
-  setBootText('Schritt 2/2 – Graph Token anfordern…');
-  const tokenRes = await fetchWithTimeout(siteUrl + '/_api/SP.OAuth.Token/Acquire', {
-    method: 'POST',
-    headers: {
-      'Accept': 'application/json;odata=verbose',
-      'Content-Type': 'application/json;odata=verbose',
-      'X-RequestDigest': digest
-    },
-    body: JSON.stringify({ resource: 'https://graph.microsoft.com' })
-  });
-
-  if (!tokenRes.ok) {
-    const errText = await tokenRes.text().catch(() => '');
-    throw new Error('Token-Abruf fehlgeschlagen: HTTP ' + tokenRes.status + '<br><small>' + escHtml(errText.substring(0, 300)) + '</small>');
-  }
-
-  const tokenData = await tokenRes.json();
-  _graphToken = tokenData?.d?.Acquire?.AccessToken
-    || tokenData?.d?.AccessToken
-    || tokenData?.AccessToken
-    || tokenData?.access_token
-    || null;
-
-  if (!_graphToken) {
-    throw new Error('Kein Access Token in Antwort.<br><small>' + escHtml(JSON.stringify(tokenData).substring(0, 300)) + '</small>');
-  }
-
-  return _graphToken;
 }
 
-// ─── Boot ──────────────────────────────────────────────────────
 window.addEventListener('DOMContentLoaded', async function() {
   if (window._bootError) { showBootError(window._bootError); return; }
-  if (window._bootWarn)  { setBootText('⚠ ' + window._bootWarn); }
 
-  // Hard timeout safety net – always show error after 12s
-  const hardTimeout = setTimeout(function() {
-    showBootError('Timeout: Keine Antwort nach 12 Sekunden.<br>URL: ' + escHtml(window.location.href) + '<br>Site: ' + escHtml(getSiteUrl()) + '<br><small>Mögliche Ursache: SP.OAuth.Token/Acquire benötigt Admin-Consent für die App-Registrierung, oder der iframe blockiert Cookies.</small>');
-  }, 12000);
+  // Wait for MSAL library (max 8s)
+  let waited = 0;
+  while (typeof msal === 'undefined' && waited < 8000) {
+    await new Promise(r => setTimeout(r, 200));
+    waited += 200;
+  }
+
+  if (typeof msal === 'undefined') {
+    showBootError(
+      'MSAL-Bibliothek konnte nicht geladen werden.<br>' +
+      'Mögliche Ursachen: Adblocker, kein Internet.<br>' +
+      'Bitte Adblocker deaktivieren und Seite neu laden.'
+    );
+    return;
+  }
+
+  const redirectUri = window.location.origin + window.location.pathname;
 
   try {
-    await getToken();
-    clearTimeout(hardTimeout);
-    showApp();
-    await loadData();
+    msalInstance = new msal.PublicClientApplication({
+      auth: {
+        clientId: CLIENT_ID,
+        authority: 'https://login.microsoftonline.com/' + TENANT_ID,
+        redirectUri: redirectUri
+      },
+      cache: { cacheLocation: 'sessionStorage', storeAuthStateInCookie: true }
+    });
+
+    if (typeof msalInstance.initialize === 'function') await msalInstance.initialize();
+
+    // Check if already signed in
+    const accounts = msalInstance.getAllAccounts();
+    if (accounts.length > 0) {
+      setBootText('Angemeldet – lade Daten…');
+      showApp();
+      await loadData();
+      return;
+    }
+
+    // Show login button (popup needs user gesture)
+    setBootText('Bitte anmelden um fortzufahren');
+    showLoginBtn('🔐 Mit Microsoft anmelden', async function() {
+      try {
+        document.getElementById('login-btn').style.display = 'none';
+        document.getElementById('boot-spinner').style.display = 'block';
+        setBootText('Anmeldung läuft…');
+        const result = await msalInstance.loginPopup({ scopes: SCOPES });
+        if (result) {
+          showApp();
+          await loadData();
+        }
+      } catch(e) {
+        let msg = e.message || String(e);
+        if (msg.includes('AADSTS50011') || msg.includes('redirect_uri')) {
+          msg = 'Redirect URI fehlt in Azure.<br>Bitte füge in der App-Registrierung unter <b>Authentifizierung → Single-Page-Anwendung</b> folgende URI ein:<br><br><code style="background:#1c2030;padding:6px 10px;border-radius:6px;font-size:12px;display:block;margin-top:8px;word-break:break-all">' + escHtml(redirectUri) + '</code>';
+        } else if (msg.includes('popup') || msg.includes('block')) {
+          msg = 'Popup wurde blockiert.<br>Bitte Popup-Blocker für <b>' + escHtml(window.location.hostname) + '</b> deaktivieren.';
+        }
+        showBootError(msg);
+      }
+    });
+
   } catch(e) {
-    clearTimeout(hardTimeout);
-    console.error('[Org]', e);
-    showBootError(e.message + '<br><small>URL: ' + escHtml(window.location.href) + '<br>Site: ' + escHtml(getSiteUrl()) + '</small>');
+    showBootError(e.message);
   }
 });
 
 function logout() {
-  _graphToken = null;
-  if (confirm('SharePoint-Sitzung beenden?')) {
-    window.location.href = getSiteUrl() + '/_layouts/15/SignOut.aspx';
-  }
+  sessionStorage.clear();
+  if (msalInstance) msalInstance.logoutRedirect();
+  else location.reload();
 }
 
 /* ════════════════════════════════════════════════════════
@@ -1595,3 +1588,4 @@ function showError(msg) {
 </script>
 </body>
 </html>
+
