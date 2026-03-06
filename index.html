@@ -903,6 +903,10 @@
         <button class="view-tab active" onclick="switchView('org')" id="tab-org">🌳 Organigramm</button>
         <button class="view-tab" onclick="switchView('grid')" id="tab-grid">⊞ Verzeichnis</button>
       </div>
+      <div class="view-tabs" id="org-mode-tabs" style="display:none;">
+        <button class="view-tab active" onclick="setOrgMode('topdown')" id="tab-topdown">↓ Top-Down</button>
+        <button class="view-tab" onclick="setOrgMode('focus')" id="tab-focus">🎯 Fokus</button>
+      </div>
       <div class="user-badge" onclick="logout()" title="Abmelden">
         <div class="avatar-fallback" id="me-avatar">?</div>
         <span id="me-name">Ich</span>
@@ -913,7 +917,9 @@
   <main>
     <!-- Sidebar -->
     <aside>
-      <div class="sidebar-header">Abteilungen</div>
+      <div class="sidebar-header" style="padding-bottom:8px;">Werke / Standorte</div>
+      <div class="dept-list" id="werk-list"></div>
+      <div class="sidebar-header" style="margin-top:8px;border-top:1px solid var(--border);padding-top:12px;">Abteilungen</div>
       <div class="dept-list" id="dept-list"></div>
       <div class="sidebar-stats">
         <div class="stat-box">
@@ -959,6 +965,9 @@ let usersById = {};
 let photoCache = {};
 let currentView = 'org';
 let currentDept = null;
+let currentWerk = null;
+let orgMode = 'topdown'; // 'topdown' | 'focus'
+let focusUserId = null;
 let collapsedNodes = new Set();
 
 const GRAPH = 'https://graph.microsoft.com/v1.0';
@@ -1185,7 +1194,7 @@ async function loadData() {
     // Load all users
     setLoading('Lade alle Benutzer…');
     let users = [];
-    let url = `${GRAPH}/users?$select=id,displayName,givenName,surname,jobTitle,department,mail,mobilePhone,businessPhones,userPrincipalName,officeLocation,manager&$expand=manager($select=id,displayName,jobTitle)&$top=999`;
+    let url = `${GRAPH}/users?$select=id,displayName,givenName,surname,jobTitle,department,companyName,mail,mobilePhone,businessPhones,userPrincipalName,officeLocation,manager&$expand=manager($select=id,displayName,jobTitle)&$top=999`;
 
     while (url) {
       const res = await fetch(url, { headers });
@@ -1206,6 +1215,8 @@ async function loadData() {
     renderDeptList();
     renderOrgChart();
     renderGrid(allUsers);
+    // Show org mode tabs since org is default view
+    document.getElementById('org-mode-tabs').style.display = 'flex';
   } catch(e) {
     hideLoading();
     console.error(e);
@@ -1247,14 +1258,61 @@ function initUI() {
   document.getElementById('stat-total').textContent = allUsers.length;
   const depts = new Set(allUsers.map(u => u.department).filter(Boolean));
   document.getElementById('stat-depts').textContent = depts.size;
+  renderWerkList();
+}
+
+/* ════════════════════════════════════════════════════════
+   WERK / STANDORT SIDEBAR
+   ════════════════════════════════════════════════════════ */
+function renderWerkList() {
+  const counts = {};
+  allUsers.forEach(u => {
+    const w = u.companyName || 'Kein Werk';
+    counts[w] = (counts[w] || 0) + 1;
+  });
+  const sorted = Object.entries(counts).sort((a,b) => b[1]-a[1]);
+  const list = document.getElementById('werk-list');
+  let html = `<div class="dept-item ${currentWerk===null?'active':''}" onclick="filterWerk(null)">
+    <div class="dept-dot" style="background:#e8a427"></div>
+    <span>Alle Werke</span>
+    <span class="dept-count">${allUsers.length}</span>
+  </div>`;
+  sorted.forEach(([werk, count], i) => {
+    const color = DEPT_COLORS[i % DEPT_COLORS.length];
+    const active = currentWerk === werk ? 'active' : '';
+    html += `<div class="dept-item ${active}" onclick="filterWerk('${escHtml(werk)}')">
+      <div class="dept-dot" style="background:${color}"></div>
+      <span>${escHtml(werk)}</span>
+      <span class="dept-count">${count}</span>
+    </div>`;
+  });
+  list.innerHTML = html;
+}
+
+function filterWerk(werk) {
+  currentWerk = werk;
+  currentDept = null;
+  renderWerkList();
+  const filtered = getFilteredUsers();
+  renderDeptList(filtered);
+  renderGrid(filtered);
+  renderOrgChart();
+}
+
+function getFilteredUsers() {
+  let users = allUsers;
+  if (currentWerk) users = users.filter(u => u.companyName === currentWerk);
+  if (currentDept) users = users.filter(u => u.department === currentDept);
+  return users;
 }
 
 /* ════════════════════════════════════════════════════════
    DEPARTMENT SIDEBAR
    ════════════════════════════════════════════════════════ */
-function renderDeptList() {
+function renderDeptList(filteredUsers) {
+  const users = filteredUsers || getFilteredUsers();
   const deptCounts = {};
-  allUsers.forEach(u => {
+  users.forEach(u => {
     const d = u.department || 'Keine Abteilung';
     deptCounts[d] = (deptCounts[d] || 0) + 1;
   });
@@ -1284,13 +1342,12 @@ function renderDeptList() {
 function filterDept(dept) {
   currentDept = dept;
   renderDeptList();
-  const filtered = dept ? allUsers.filter(u => u.department === dept) : allUsers;
+  const filtered = getFilteredUsers();
   renderGrid(filtered);
-
   if (currentView === 'grid') {
     document.getElementById('grid-title').textContent = dept || 'Alle Mitarbeiter';
   } else {
-    renderOrgChart(dept);
+    renderOrgChart();
   }
 }
 
@@ -1303,6 +1360,26 @@ function switchView(view) {
   document.getElementById('view-grid').classList.toggle('active', view === 'grid');
   document.getElementById('tab-org').classList.toggle('active', view === 'org');
   document.getElementById('tab-grid').classList.toggle('active', view === 'grid');
+  document.getElementById('org-mode-tabs').style.display = view === 'org' ? 'flex' : 'none';
+}
+
+function setOrgMode(mode) {
+  orgMode = mode;
+  document.getElementById('tab-topdown').classList.toggle('active', mode === 'topdown');
+  document.getElementById('tab-focus').classList.toggle('active', mode === 'focus');
+  if (mode === 'topdown') {
+    focusUserId = null;
+    renderOrgChart();
+  } else {
+    // Focus mode: show search prompt
+    const container = document.getElementById('org-container');
+    container.innerHTML = `<div class="empty-state">
+      <div class="icon">🎯</div>
+      <h3>Fokus-Ansicht</h3>
+      <p>Klicke auf eine Person im Verzeichnis oder suche nach ihr, um ihr Organigramm anzuzeigen.</p>
+      <button class="btn-login" style="margin-top:16px;max-width:200px;" onclick="switchView('grid')">⊞ Zum Verzeichnis</button>
+    </div>`;
+  }
 }
 
 /* ════════════════════════════════════════════════════════
@@ -1311,9 +1388,9 @@ function switchView(view) {
 function handleSearch(q) {
   const lower = q.toLowerCase().trim();
   if (!lower) {
-    const filtered = currentDept ? allUsers.filter(u => u.department === currentDept) : allUsers;
+    const filtered = getFilteredUsers();
     renderGrid(filtered);
-    if (currentView === 'org') renderOrgChart(currentDept);
+    if (currentView === 'org') renderOrgChart();
     return;
   }
 
@@ -1352,6 +1429,7 @@ function renderGrid(users, title) {
       <div class="uc-info">
         <div class="uc-name">${escHtml(u.displayName)}</div>
         <div class="uc-title">${escHtml(u.jobTitle || '—')}</div>
+        ${u.companyName ? `<div class="uc-dept" style="background:rgba(232,164,39,0.12);color:var(--accent);">${escHtml(u.companyName)}</div>` : ''}
         ${u.department ? `<div class="uc-dept">${escHtml(u.department)}</div>` : ''}
         <div class="uc-contacts">
           ${u.mail ? `<a class="uc-contact" href="mailto:${u.mail}"><span>✉</span>${escHtml(u.mail)}</a>` : ''}
@@ -1392,9 +1470,105 @@ function buildHierarchy(users) {
   return roots.map(r => buildNode(r));
 }
 
-function renderOrgChart(deptFilter) {
+function renderFocusChart(userId) {
   const container = document.getElementById('org-container');
-  const users = deptFilter ? allUsers.filter(u => u.department === deptFilter) : allUsers;
+  const user = usersById[userId];
+  if (!user) return;
+
+  // Build chain upward (ancestors)
+  const ancestors = [];
+  let cur = user;
+  let safety = 0;
+  while (cur.manager && usersById[cur.manager.id] && safety < 10) {
+    cur = usersById[cur.manager.id];
+    ancestors.unshift(cur);
+    safety++;
+  }
+
+  // Direct reports
+  const directs = allUsers.filter(u => u.manager?.id === userId);
+
+  container.innerHTML = '';
+  const wrap = document.createElement('div');
+  wrap.className = 'org-tree';
+  wrap.style.padding = '24px 16px';
+
+  // Render ancestors as thin chain
+  ancestors.forEach((anc, i) => {
+    const row = document.createElement('div');
+    row.style.cssText = 'display:flex;flex-direction:column;align-items:center;';
+    const card = makeFocusCard(anc, false, i === ancestors.length-1);
+    row.appendChild(card);
+    const line = document.createElement('div');
+    line.style.cssText = 'width:2px;height:20px;background:var(--border);';
+    row.appendChild(line);
+    wrap.appendChild(row);
+  });
+
+  // Render focus user (highlighted)
+  const focusRow = document.createElement('div');
+  focusRow.style.cssText = 'display:flex;flex-direction:column;align-items:center;';
+  focusRow.appendChild(makeFocusCard(user, true));
+  if (directs.length) {
+    const line = document.createElement('div');
+    line.style.cssText = 'width:2px;height:20px;background:var(--accent);';
+    focusRow.appendChild(line);
+  }
+  wrap.appendChild(focusRow);
+
+  // Render direct reports
+  if (directs.length) {
+    const dirRow = document.createElement('div');
+    dirRow.style.cssText = 'display:flex;flex-wrap:wrap;gap:12px;justify-content:center;margin-top:0;';
+    directs.forEach(d => {
+      const col = document.createElement('div');
+      col.style.cssText = 'display:flex;flex-direction:column;align-items:center;';
+      const topLine = document.createElement('div');
+      topLine.style.cssText = 'width:2px;height:20px;background:var(--border);';
+      col.appendChild(topLine);
+      col.appendChild(makeFocusCard(d, false));
+      dirRow.appendChild(col);
+    });
+    wrap.appendChild(dirRow);
+  }
+
+  container.appendChild(wrap);
+
+  // Lazy load photos
+  [user, ...ancestors, ...directs].forEach(u => {
+    loadPhoto(u.id).then(url => {
+      if (!url) return;
+      const el = document.getElementById('focus-avatar-' + u.id);
+      if (el) el.outerHTML = `<img src="${url}" style="width:52px;height:52px;border-radius:50%;object-fit:cover;margin:0 auto 10px;display:block;border:2px solid var(--border)" />`;
+    });
+  });
+}
+
+function makeFocusCard(user, isMain, isDirect = false) {
+  const card = document.createElement('div');
+  card.className = 'org-card' + (isMain ? ' root-card' : '');
+  if (isMain) card.style.cssText = 'border-color:var(--accent);box-shadow:0 0 20px rgba(232,164,39,0.2);';
+  card.onclick = () => { focusUserId = user.id; renderFocusChart(user.id); };
+  card.innerHTML = `
+    <div class="card-avatar" id="focus-avatar-${user.id}">${initials(user.displayName)}</div>
+    <div class="card-name">${escHtml(user.displayName)}</div>
+    <div class="card-title">${escHtml(user.jobTitle || '')}</div>
+    ${user.department ? `<div class="card-dept-tag">${escHtml(user.department)}</div>` : ''}
+    ${user.companyName ? `<div class="card-dept-tag" style="background:rgba(232,164,39,0.15);color:var(--accent)">${escHtml(user.companyName)}</div>` : ''}
+  `;
+  return card;
+}
+
+function renderOrgChart() {
+  const container = document.getElementById('org-container');
+
+  // Focus mode
+  if (orgMode === 'focus' && focusUserId) {
+    renderFocusChart(focusUserId);
+    return;
+  }
+
+  const users = getFilteredUsers();
 
   if (!users.length) {
     container.innerHTML = `<div class="empty-state">
@@ -1520,6 +1694,12 @@ async function openPanel(userId) {
   const user = usersById[userId];
   if (!user) return;
 
+  // In focus mode, clicking a card updates the focus
+  if (orgMode === 'focus') {
+    focusUserId = userId;
+    renderFocusChart(userId);
+  }
+
   const panel = document.getElementById('detail-panel');
   const content = document.getElementById('panel-content');
 
@@ -1542,6 +1722,7 @@ async function openPanel(userId) {
       ${avatarHtml}
       <h2>${escHtml(user.displayName)}</h2>
       <div class="ph-title">${escHtml(user.jobTitle || '—')}</div>
+      ${user.companyName ? `<div class="ph-dept-badge" style="background:rgba(232,164,39,0.15);color:var(--accent);border-color:rgba(232,164,39,0.3);margin-bottom:6px;">${escHtml(user.companyName)}</div>` : ''}
       ${user.department ? `<div class="ph-dept-badge">${escHtml(user.department)}</div>` : ''}
     </div>
 
