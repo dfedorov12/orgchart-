@@ -5,7 +5,7 @@
 <meta name="viewport" content="width=device-width, initial-scale=1.0" />
 <title>Organigramm – Unternehmensverzeichnis</title>
 
-<script src="https://alcdn.msauth.net/browser/2.38.3/js/msal-browser.min.js"></script>
+<!-- No external dependencies - native PKCE OAuth2 -->
 <script>
 (function(){
   var proto = window.location.protocol;
@@ -969,15 +969,31 @@ const DEPT_COLORS = [
 ];
 
 /* ════════════════════════════════════════════════════════
-   AUTH – MSAL mit Popup
+   AUTH – Native PKCE OAuth2, kein MSAL, kein CDN
    ════════════════════════════════════════════════════════ */
 
-const TENANT_ID = 'fdb70646-023a-403b-a4b9-1f474a935123';
-const CLIENT_ID = '4bd5e16e-5345-4ded-adc8-2a7f25922786';
-const SCOPES    = ['User.Read', 'User.Read.All', 'User.ReadBasic.All'];
+const TENANT_ID   = 'fdb70646-023a-403b-a4b9-1f474a935123';
+const CLIENT_ID   = '4bd5e16e-5345-4ded-adc8-2a7f25922786';
+const REDIRECT_URI = window.location.origin + window.location.pathname;
+const SCOPES      = 'User.Read User.Read.All User.ReadBasic.All';
+const AUTH_URL    = 'https://login.microsoftonline.com/' + TENANT_ID + '/oauth2/v2.0/authorize';
+const TOKEN_URL   = 'https://login.microsoftonline.com/' + TENANT_ID + '/oauth2/v2.0/token';
 
-let msalInstance = null;
+let _accessToken = null;
 
+// ─── PKCE helpers ─────────────────────────────────────────────
+function base64urlencode(buf) {
+  return btoa(String.fromCharCode(...new Uint8Array(buf)))
+    .replace(/\+/g, '-').replace(/\//g, '_').replace(/=/g, '');
+}
+
+async function generatePKCE() {
+  const verifier = base64urlencode(crypto.getRandomValues(new Uint8Array(32)));
+  const digest   = await crypto.subtle.digest('SHA-256', new TextEncoder().encode(verifier));
+  return { verifier, challenge: base64urlencode(digest) };
+}
+
+// ─── UI helpers ───────────────────────────────────────────────
 function setBootText(t) {
   const el = document.getElementById('boot-text');
   if (el) el.textContent = t;
@@ -992,15 +1008,8 @@ function showBootError(msg) {
   const el = document.getElementById('login-error');
   if (el) { el.style.display = 'block'; el.innerHTML = '⚠️ ' + msg; }
   const btn = document.getElementById('login-btn');
-  if (btn) { btn.style.display = 'block'; btn.textContent = 'Erneut versuchen'; btn.onclick = () => location.reload(); }
+  if (btn) { btn.style.display = 'block'; btn.textContent = 'Mit Microsoft anmelden'; btn.onclick = startLogin; }
   console.error('[Org]', msg);
-}
-
-function showLoginBtn(label, fn) {
-  const sp = document.getElementById('boot-spinner');
-  if (sp) sp.style.display = 'none';
-  const btn = document.getElementById('login-btn');
-  if (btn) { btn.style.display = 'block'; btn.textContent = label; btn.onclick = fn; }
 }
 
 function hideBoot() {
@@ -1014,93 +1023,150 @@ function showApp() {
   document.getElementById('app').classList.add('visible');
 }
 
-async function getToken() {
-  const accounts = msalInstance.getAllAccounts();
-  if (!accounts.length) throw new Error('Nicht angemeldet');
+// ─── Token storage ────────────────────────────────────────────
+function saveToken(token, expiry) {
   try {
-    const r = await msalInstance.acquireTokenSilent({ scopes: SCOPES, account: accounts[0] });
-    return r.accessToken;
-  } catch(e) {
-    // Silent failed – try popup
-    const r = await msalInstance.acquireTokenPopup({ scopes: SCOPES });
-    return r.accessToken;
-  }
+    sessionStorage.setItem('org_token', token);
+    sessionStorage.setItem('org_token_exp', expiry);
+  } catch(e) {}
 }
 
+function loadToken() {
+  try {
+    const t = sessionStorage.getItem('org_token');
+    const exp = parseInt(sessionStorage.getItem('org_token_exp') || '0');
+    if (t && Date.now() < exp - 60000) return t;
+  } catch(e) {}
+  return null;
+}
+
+async function getToken() {
+  if (_accessToken) return _accessToken;
+  const cached = loadToken();
+  if (cached) { _accessToken = cached; return cached; }
+  throw new Error('Kein Token – bitte neu anmelden');
+}
+
+// ─── Login: redirect to Azure AD ─────────────────────────────
+async function startLogin() {
+  const { verifier, challenge } = await generatePKCE();
+  const state = base64urlencode(crypto.getRandomValues(new Uint8Array(16)));
+
+  sessionStorage.setItem('pkce_verifier', verifier);
+  sessionStorage.setItem('pkce_state', state);
+
+  const params = new URLSearchParams({
+    client_id:             CLIENT_ID,
+    response_type:         'code',
+    redirect_uri:          REDIRECT_URI,
+    scope:                 SCOPES + ' offline_access',
+    state:                 state,
+    code_challenge:        challenge,
+    code_challenge_method: 'S256',
+    prompt:                'select_account'
+  });
+
+  window.location.href = AUTH_URL + '?' + params.toString();
+}
+
+// ─── Handle redirect back from Azure AD ──────────────────────
+async function handleRedirect() {
+  const params = new URLSearchParams(window.location.search);
+  const code   = params.get('code');
+  const state  = params.get('state');
+  const error  = params.get('error');
+
+  if (error) {
+    showBootError('Azure AD Fehler: ' + escHtml(params.get('error_description') || error));
+    return false;
+  }
+
+  if (!code) return false;
+
+  // Validate state
+  const savedState = sessionStorage.getItem('pkce_state');
+  if (state !== savedState) {
+    showBootError('Ungültiger State-Parameter. Bitte neu anmelden.');
+    return false;
+  }
+
+  const verifier = sessionStorage.getItem('pkce_verifier');
+  if (!verifier) {
+    showBootError('PKCE Verifier fehlt. Bitte neu anmelden.');
+    return false;
+  }
+
+  setBootText('Token wird abgerufen…');
+
+  // Clean URL
+  window.history.replaceState({}, document.title, window.location.pathname);
+
+  // Exchange code for token
+  const body = new URLSearchParams({
+    client_id:     CLIENT_ID,
+    grant_type:    'authorization_code',
+    code:          code,
+    redirect_uri:  REDIRECT_URI,
+    code_verifier: verifier
+  });
+
+  const res = await fetch(TOKEN_URL, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/x-www-form-urlencoded' },
+    body: body.toString()
+  });
+
+  const data = await res.json();
+
+  if (data.error) {
+    showBootError('Token-Fehler: ' + escHtml(data.error_description || data.error));
+    return false;
+  }
+
+  _accessToken = data.access_token;
+  saveToken(_accessToken, Date.now() + data.expires_in * 1000);
+  sessionStorage.removeItem('pkce_verifier');
+  sessionStorage.removeItem('pkce_state');
+  return true;
+}
+
+// ─── Boot ────────────────────────────────────────────────────
 window.addEventListener('DOMContentLoaded', async function() {
   if (window._bootError) { showBootError(window._bootError); return; }
 
-  // Wait for MSAL library (max 8s)
-  let waited = 0;
-  while (typeof msal === 'undefined' && waited < 8000) {
-    await new Promise(r => setTimeout(r, 200));
-    waited += 200;
-  }
-
-  if (typeof msal === 'undefined') {
-    showBootError(
-      'MSAL-Bibliothek konnte nicht geladen werden.<br>' +
-      'Mögliche Ursachen: Adblocker, kein Internet.<br>' +
-      'Bitte Adblocker deaktivieren und Seite neu laden.'
-    );
+  // Try cached token first
+  const cached = loadToken();
+  if (cached) {
+    _accessToken = cached;
+    showApp();
+    await loadData();
     return;
   }
 
-  const redirectUri = window.location.origin + window.location.pathname;
-
-  try {
-    msalInstance = new msal.PublicClientApplication({
-      auth: {
-        clientId: CLIENT_ID,
-        authority: 'https://login.microsoftonline.com/' + TENANT_ID,
-        redirectUri: redirectUri
-      },
-      cache: { cacheLocation: 'sessionStorage', storeAuthStateInCookie: true }
-    });
-
-    if (typeof msalInstance.initialize === 'function') await msalInstance.initialize();
-
-    // Check if already signed in
-    const accounts = msalInstance.getAllAccounts();
-    if (accounts.length > 0) {
-      setBootText('Angemeldet – lade Daten…');
+  // Handle redirect from Azure AD
+  const hasCode = window.location.search.includes('code=');
+  if (hasCode) {
+    const ok = await handleRedirect();
+    if (ok) {
       showApp();
       await loadData();
       return;
     }
-
-    // Show login button (popup needs user gesture)
-    setBootText('Bitte anmelden um fortzufahren');
-    showLoginBtn('🔐 Mit Microsoft anmelden', async function() {
-      try {
-        document.getElementById('login-btn').style.display = 'none';
-        document.getElementById('boot-spinner').style.display = 'block';
-        setBootText('Anmeldung läuft…');
-        const result = await msalInstance.loginPopup({ scopes: SCOPES });
-        if (result) {
-          showApp();
-          await loadData();
-        }
-      } catch(e) {
-        let msg = e.message || String(e);
-        if (msg.includes('AADSTS50011') || msg.includes('redirect_uri')) {
-          msg = 'Redirect URI fehlt in Azure.<br>Bitte füge in der App-Registrierung unter <b>Authentifizierung → Single-Page-Anwendung</b> folgende URI ein:<br><br><code style="background:#1c2030;padding:6px 10px;border-radius:6px;font-size:12px;display:block;margin-top:8px;word-break:break-all">' + escHtml(redirectUri) + '</code>';
-        } else if (msg.includes('popup') || msg.includes('block')) {
-          msg = 'Popup wurde blockiert.<br>Bitte Popup-Blocker für <b>' + escHtml(window.location.hostname) + '</b> deaktivieren.';
-        }
-        showBootError(msg);
-      }
-    });
-
-  } catch(e) {
-    showBootError(e.message);
+    return;
   }
+
+  // No token, no code → show login button
+  setBootText('Bitte anmelden um fortzufahren');
+  const sp = document.getElementById('boot-spinner');
+  if (sp) sp.style.display = 'none';
+  const btn = document.getElementById('login-btn');
+  if (btn) { btn.style.display = 'block'; btn.textContent = '🔐 Mit Microsoft anmelden'; btn.onclick = startLogin; }
 });
 
 function logout() {
   sessionStorage.clear();
-  if (msalInstance) msalInstance.logoutRedirect();
-  else location.reload();
+  _accessToken = null;
+  window.location.href = 'https://login.microsoftonline.com/' + TENANT_ID + '/oauth2/v2.0/logout?post_logout_redirect_uri=' + encodeURIComponent(REDIRECT_URI);
 }
 
 /* ════════════════════════════════════════════════════════
@@ -1588,4 +1654,3 @@ function showError(msg) {
 </script>
 </body>
 </html>
-
