@@ -6,27 +6,7 @@
 <title>Organigramm – Unternehmensverzeichnis</title>
 
 <!-- No external dependencies - native PKCE OAuth2 -->
-<script>
-(function(){
-  var proto = window.location.protocol;
-  var host  = window.location.hostname;
-  var isLocal = (proto === 'file:') || host === '' || host === 'localhost' || host === '127.0.0.1';
-  var isSP = host.indexOf('.sharepoint.com') !== -1 || host.indexOf('sharepoint-df.com') !== -1;
-  if (isLocal) {
-    window._bootError = [
-      '<b style="font-size:18px">&#128683; Lokale Datei erkannt</b>',
-      'Diese App funktioniert <strong>nur in SharePoint</strong>.',
-      'Sie kann nicht als heruntergeladene HTML-Datei im Browser geöffnet werden.',
-      '<br><b>So gehts:</b>',
-      '1. Datei in SharePoint-Bibliothek hochladen (z.B. "Site Assets")',
-      '2. SharePoint-Seite bearbeiten &rarr; <em>Embed-Webpart</em> hinzuf&uuml;gen',
-      '3. URL der hochgeladenen Datei eintragen &rarr; Speichern &amp; Ver&ouml;ffentlichen'
-    ].join('<br>');
-  } else if (!isSP) {
-    window._bootWarn = 'Nicht von SharePoint ausgeliefert (' + host + '). Auth k&ouml;nnte fehlschlagen.';
-  }
-})();
-</script>
+
 <link href="https://fonts.googleapis.com/css2?family=Syne:wght@400;500;600;700;800&family=DM+Sans:ital,opsz,wght@0,9..40,300;0,9..40,400;0,9..40,500;1,9..40,300&display=swap" rel="stylesheet" />
 
 <style>
@@ -855,6 +835,41 @@
   }
   #overlay.visible { display: block; }
 
+
+  /* ─── Toggle switches ───────────────────────────────────── */
+  .toggle-wrap { flex-shrink:0; }
+  .toggle-track {
+    width:40px; height:20px; border-radius:10px;
+    position:relative; cursor:pointer;
+    transition:background 0.2s;
+  }
+  .toggle-thumb {
+    position:absolute; top:2px; left:2px;
+    width:16px; height:16px; border-radius:50%;
+    background:#fff;
+    transition:transform 0.2s;
+  }
+
+  /* ─── Sidebar section headers ───────────────────────────── */
+  .sidebar-section-header {
+    display:flex; align-items:center; justify-content:space-between;
+    padding:10px 16px 8px;
+    font-size:11px; font-weight:700;
+    letter-spacing:.08em; text-transform:uppercase;
+    color:var(--text-muted);
+    cursor:pointer;
+    border-top:1px solid var(--border);
+    user-select:none;
+    transition:color 0.15s;
+  }
+  .sidebar-section-header:hover { color:var(--text); }
+
+  /* ─── License badges on cards ───────────────────────────── */
+  .license-dot {
+    width:8px; height:8px; border-radius:50%;
+    flex-shrink:0; display:inline-block;
+  }
+
   /* ─── Scrollbar ──────────────────────────────────────── */
   ::-webkit-scrollbar { width: 6px; height: 6px; }
   ::-webkit-scrollbar-track { background: transparent; }
@@ -917,10 +932,47 @@
   <main>
     <!-- Sidebar -->
     <aside>
-      <div class="sidebar-header" style="padding-bottom:8px;">Werke / Standorte</div>
-      <div class="dept-list" id="werk-list"></div>
-      <div class="sidebar-header" style="margin-top:8px;border-top:1px solid var(--border);padding-top:12px;">Abteilungen</div>
-      <div class="dept-list" id="dept-list"></div>
+      <!-- License toggle -->
+      <div style="padding:14px 16px 10px;border-bottom:1px solid var(--border);">
+        <div style="font-size:11px;font-weight:700;letter-spacing:.08em;text-transform:uppercase;color:var(--text-muted);margin-bottom:10px;">Lizenzfilter</div>
+        <div style="display:flex;flex-direction:column;gap:7px;">
+          <label style="display:flex;align-items:center;gap:10px;cursor:pointer;font-size:13px;">
+            <div class="toggle-wrap" onclick="toggleLicenseFilter('licensed')">
+              <div class="toggle-track" id="track-licensed" style="background:var(--green)">
+                <div class="toggle-thumb" id="thumb-licensed" style="transform:translateX(20px)"></div>
+              </div>
+            </div>
+            <span>Lizenziert <span id="count-licensed" style="color:var(--text-dim);font-size:11px;"></span></span>
+          </label>
+          <label style="display:flex;align-items:center;gap:10px;cursor:pointer;font-size:13px;">
+            <div class="toggle-wrap" onclick="toggleLicenseFilter('unlicensed')">
+              <div class="toggle-track" id="track-unlicensed" style="background:var(--text-dim)">
+                <div class="toggle-thumb" id="thumb-unlicensed" style="transform:translateX(0px)"></div>
+              </div>
+            </div>
+            <span>Unlizenziert <span id="count-unlicensed" style="color:var(--text-dim);font-size:11px;"></span></span>
+          </label>
+        </div>
+      </div>
+
+      <!-- Werke collapsible -->
+      <div class="sidebar-section-header" onclick="toggleSection('werk')">
+        <span>Werke / Standorte</span>
+        <span id="werk-chevron">▾</span>
+      </div>
+      <div id="werk-section">
+        <div class="dept-list" id="werk-list"></div>
+      </div>
+
+      <!-- Abteilungen collapsible -->
+      <div class="sidebar-section-header" onclick="toggleSection('dept')">
+        <span>Abteilungen</span>
+        <span id="dept-chevron">▾</span>
+      </div>
+      <div id="dept-section">
+        <div class="dept-list" id="dept-list"></div>
+      </div>
+
       <div class="sidebar-stats">
         <div class="stat-box">
           <div class="stat-num" id="stat-total">—</div>
@@ -966,8 +1018,12 @@ let photoCache = {};
 let currentView = 'org';
 let currentDept = null;
 let currentWerk = null;
-let orgMode = 'topdown'; // 'topdown' | 'focus'
+let orgMode = 'topdown';
 let focusUserId = null;
+let showLicensed = true;
+let showUnlicensed = true;
+let werkCollapsed = false;
+let deptCollapsed = false;
 let collapsedNodes = new Set();
 
 const GRAPH = 'https://graph.microsoft.com/v1.0';
@@ -1194,7 +1250,7 @@ async function loadData() {
     // Load all users
     setLoading('Lade alle Benutzer…');
     let users = [];
-    let url = `${GRAPH}/users?$select=id,displayName,givenName,surname,jobTitle,department,companyName,mail,mobilePhone,businessPhones,userPrincipalName,officeLocation,manager&$expand=manager($select=id,displayName,jobTitle)&$top=999`;
+    let url = `${GRAPH}/users?$select=id,displayName,givenName,surname,jobTitle,department,companyName,mail,mobilePhone,businessPhones,userPrincipalName,officeLocation,assignedLicenses,manager&$expand=manager($select=id,displayName,jobTitle)&$top=999`;
 
     while (url) {
       const res = await fetch(url, { headers });
@@ -1258,6 +1314,9 @@ function initUI() {
   document.getElementById('stat-total').textContent = allUsers.length;
   const depts = new Set(allUsers.map(u => u.department).filter(Boolean));
   document.getElementById('stat-depts').textContent = depts.size;
+  const lic = allUsers.filter(isLicensed).length;
+  document.getElementById('count-licensed').textContent = '(' + lic + ')';
+  document.getElementById('count-unlicensed').textContent = '(' + (allUsers.length - lic) + ')';
   renderWerkList();
 }
 
@@ -1299,11 +1358,50 @@ function filterWerk(werk) {
   renderOrgChart();
 }
 
+function isLicensed(u) {
+  return u.assignedLicenses && u.assignedLicenses.length > 0;
+}
+
 function getFilteredUsers() {
   let users = allUsers;
   if (currentWerk) users = users.filter(u => u.companyName === currentWerk);
   if (currentDept) users = users.filter(u => u.department === currentDept);
+  if (!showLicensed) users = users.filter(u => !isLicensed(u));
+  if (!showUnlicensed) users = users.filter(u => isLicensed(u));
   return users;
+}
+
+function toggleLicenseFilter(type) {
+  if (type === 'licensed') {
+    showLicensed = !showLicensed;
+    document.getElementById('track-licensed').style.background = showLicensed ? 'var(--green)' : 'var(--text-dim)';
+    document.getElementById('thumb-licensed').style.transform = showLicensed ? 'translateX(20px)' : 'translateX(0)';
+  } else {
+    showUnlicensed = !showUnlicensed;
+    document.getElementById('track-unlicensed').style.background = showUnlicensed ? 'var(--green)' : 'var(--text-dim)';
+    document.getElementById('thumb-unlicensed').style.transform = showUnlicensed ? 'translateX(20px)' : 'translateX(0)';
+  }
+  refreshAll();
+}
+
+function refreshAll() {
+  const filtered = getFilteredUsers();
+  renderWerkList();
+  renderDeptList(filtered);
+  renderGrid(filtered);
+  if (currentView === 'org') renderOrgChart();
+}
+
+function toggleSection(type) {
+  if (type === 'werk') {
+    werkCollapsed = !werkCollapsed;
+    document.getElementById('werk-section').style.display = werkCollapsed ? 'none' : 'block';
+    document.getElementById('werk-chevron').textContent = werkCollapsed ? '▸' : '▾';
+  } else {
+    deptCollapsed = !deptCollapsed;
+    document.getElementById('dept-section').style.display = deptCollapsed ? 'none' : 'block';
+    document.getElementById('dept-chevron').textContent = deptCollapsed ? '▸' : '▾';
+  }
 }
 
 /* ════════════════════════════════════════════════════════
@@ -1320,10 +1418,11 @@ function renderDeptList(filteredUsers) {
   const sorted = Object.entries(deptCounts).sort((a,b) => b[1]-a[1]);
   const list = document.getElementById('dept-list');
 
+  const totalFiltered = (currentWerk ? allUsers.filter(u => u.companyName === currentWerk) : allUsers).filter(u => (showLicensed || !isLicensed(u)) && (showUnlicensed || isLicensed(u))).length;
   let html = `<div class="dept-item ${currentDept===null?'active':''}" onclick="filterDept(null)">
     <div class="dept-dot" style="background:#e8a427"></div>
-    <span>Alle Mitarbeiter</span>
-    <span class="dept-count">${allUsers.length}</span>
+    <span>Alle Abteilungen</span>
+    <span class="dept-count">${totalFiltered}</span>
   </div>`;
 
   sorted.forEach(([dept, count], i) => {
@@ -1388,11 +1487,17 @@ function setOrgMode(mode) {
 function handleSearch(q) {
   const lower = q.toLowerCase().trim();
   if (!lower) {
+    // Restore current view
+    document.getElementById('view-org').classList.toggle('active', currentView === 'org');
+    document.getElementById('view-grid').classList.toggle('active', currentView === 'grid');
     const filtered = getFilteredUsers();
     renderGrid(filtered);
-    if (currentView === 'org') renderOrgChart();
+    document.getElementById('grid-title').textContent = currentDept || currentWerk || 'Alle Mitarbeiter';
     return;
   }
+  // While searching: always show grid, hide org
+  document.getElementById('view-org').classList.remove('active');
+  document.getElementById('view-grid').classList.add('active');
 
   switchView('grid');
   const results = allUsers.filter(u =>
@@ -1455,19 +1560,28 @@ function renderGrid(users, title) {
    ORG CHART
    ════════════════════════════════════════════════════════ */
 function buildHierarchy(users) {
-  // Find root nodes: users whose manager is not in our user list
   const userIds = new Set(users.map(u => u.id));
-  const roots = users.filter(u => {
-    const mgr = u.manager;
-    return !mgr || !userIds.has(mgr.id);
+
+  // Root = no manager OR manager not in filtered list
+  const roots = users.filter(u => !u.manager || !userIds.has(u.manager.id));
+
+  // Build child map for O(n) lookup
+  const childMap = {};
+  users.forEach(u => {
+    if (u.manager && userIds.has(u.manager.id)) {
+      if (!childMap[u.manager.id]) childMap[u.manager.id] = [];
+      childMap[u.manager.id].push(u);
+    }
   });
 
   function buildNode(user, depth = 0) {
-    const children = users.filter(u => u.manager?.id === user.id);
+    const children = (childMap[user.id] || []).sort((a,b) =>
+      (a.displayName||'').localeCompare(b.displayName||''));
     return { user, children: children.map(c => buildNode(c, depth+1)), depth };
   }
 
-  return roots.map(r => buildNode(r));
+  // Sort roots by name
+  return roots.sort((a,b) => (a.displayName||'').localeCompare(b.displayName||'')).map(r => buildNode(r));
 }
 
 function renderFocusChart(userId) {
@@ -1563,8 +1677,17 @@ function renderOrgChart() {
   const container = document.getElementById('org-container');
 
   // Focus mode
-  if (orgMode === 'focus' && focusUserId) {
-    renderFocusChart(focusUserId);
+  if (orgMode === 'focus') {
+    if (focusUserId) {
+      renderFocusChart(focusUserId);
+    } else {
+      container.innerHTML = `<div class="empty-state">
+        <div class="icon">🎯</div>
+        <h3>Fokus-Ansicht</h3>
+        <p>Klicke auf eine Person im Verzeichnis oder suche sie, um ihr Organigramm zu sehen.</p>
+        <button class="btn-login" style="margin-top:16px;max-width:220px;" onclick="switchView('grid')">⊞ Zum Verzeichnis</button>
+      </div>`;
+    }
     return;
   }
 
@@ -1624,9 +1747,10 @@ function renderOrgNode(node, allUsersList, isRoot = false) {
   const card = document.createElement('div');
   card.className = 'org-card' + (isRoot ? ' root-card' : '');
   card.onclick = (e) => { e.stopPropagation(); openPanel(user.id); };
+  const licDot = isLicensed(user) ? '<span class="license-dot" style="background:var(--green)" title="Lizenziert"></span>' : '<span class="license-dot" style="background:var(--text-dim)" title="Unlizenziert"></span>';
   card.innerHTML = `
     <div class="card-avatar" id="org-avatar-${user.id}">${initials(user.displayName)}</div>
-    <div class="card-name">${escHtml(user.displayName)}</div>
+    <div class="card-name" style="display:flex;align-items:center;justify-content:center;gap:5px;">${licDot}${escHtml(user.displayName)}</div>
     <div class="card-title">${escHtml(user.jobTitle || '')}</div>
     ${user.department ? `<div class="card-dept-tag">${escHtml(user.department)}</div>` : ''}
   `;
