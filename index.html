@@ -591,8 +591,9 @@ async function handleRedir(){
 
 addEventListener('DOMContentLoaded',async()=>{
   const c=loadTok();
-  if(c){_tok=c;const ok=await checkAndBoot();if(ok){showApp();setLoad('Lade Benutzerdaten…');await loadData();}return;}
-  if(location.search.includes('code=')){const ok=await handleRedir();if(ok){const pok=await checkAndBoot();if(pok){showApp();setLoad('Lade Benutzerdaten…');await loadData();}}return;}
+  // PERM CHECK DEACTIVATED — managed via M365 directly
+  if(c){_tok=c;showApp();setLoad('Lade Benutzerdaten…');await loadData();return;}
+  if(location.search.includes('code=')){const ok=await handleRedir();if(ok){showApp();setLoad('Lade Benutzerdaten…');await loadData();}return;}
   setBoot('Bitte anmelden, um fortzufahren.');
   $id('boot-spin').style.display='none';
   $id('boot-btn').style.display='block';$id('boot-btn').onclick=startLogin;
